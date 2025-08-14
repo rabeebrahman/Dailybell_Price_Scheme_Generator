@@ -27,6 +27,24 @@ def delete_file_after_delay(filepath, delay=300):
             os.remove(filepath)
     threading.Thread(target=delete).start()
 
+def ensure_expected_columns(df):
+    """
+    Ensures that all expected columns exist.
+    Missing columns are created with blank values.
+    Extra columns are kept as-is.
+    """
+    expected_cols = [
+        "Serial Number", "Quotation Date", "Product Name", "Qty", "Variant Name",
+        "Item Total Amount", "Price with Tax", "Item Net Amount", "Tax (%)",
+        "CGST", "IGST", "SGST", "HSN/SAC", "Party Name", "Party Company Name",
+        "Party Mobile", "Party GSTIN", "Created By", "sales man"
+    ]
+
+    for col in expected_cols:
+        if col not in df.columns:
+            df[col] = np.nan  # create missing column
+    return df
+
 def apply_price_scheme(quotation_df, slabs_df):
     quotation_df["Product Name"] = quotation_df["Product Name"].astype(str).str.strip().str.lower()
     slabs_df["Product Name"] = slabs_df["Product Name"].astype(str).str.strip().str.lower()
@@ -109,40 +127,51 @@ def highlight_mismatches(excel_path):
                     ws.cell(row=row, column=col).fill = highlight_fill
     wb.save(excel_path)
 
+from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, PageBreak
+from reportlab.lib import colors
+from reportlab.lib.pagesizes import letter
+from reportlab.lib.styles import getSampleStyleSheet
+
 def generate_pdf(df, pdf_path):
-    doc = SimpleDocTemplate(pdf_path, pagesize=A4)
-    elements = []
+    # Sort by Party Name if available
+    if "Party Name" in df.columns:
+        df = df.sort_values(by="Party Name", ascending=True)
+
+    df = df.fillna("").astype(str)
     styles = getSampleStyleSheet()
-    data = [df.columns.tolist()] + df.values.tolist()
+    normal_style = styles["Normal"]
 
-    table_data = []
-    for row in data:
-        formatted = [Paragraph(str(cell), styles["BodyText"]) for cell in row]
-        table_data.append(formatted)
+    # Wrap all text in Paragraph to allow line breaks
+    data = [[Paragraph(str(col), normal_style) for col in df.columns]]
+    for row in df.values.tolist():
+        data.append([Paragraph(str(cell), normal_style) for cell in row])
 
-    table = Table(table_data, repeatRows=1)
-    style = TableStyle([
-        ("BACKGROUND", (0, 0), (-1, 0), colors.gray),
-        ("TEXTCOLOR", (0, 0), (-1, 0), colors.whitesmoke),
-        ("ALIGN", (0, 0), (-1, -1), "CENTER"),
-        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-        ("FONTSIZE", (0, 0), (-1, -1), 7),
-        ("BOTTOMPADDING", (0, 0), (-1, 0), 6),
-        ("GRID", (0, 0), (-1, -1), 0.25, colors.black),
-    ])
+    # Approximate equal column widths for the page
+    col_count = len(df.columns)
+    page_width = letter[0] - 40  # margin space
+    col_widths = [page_width / col_count] * col_count
 
-    for idx, row in enumerate(df.itertuples(), start=1):
-        if (
-            isinstance(row._6, (int, float))
-            and isinstance(row._7, (int, float))
-            and round(row._6, 2) != round(row._7, 2)
-            and row._8 != "No Match"
-        ):
-            style.add("BACKGROUND", (0, idx), (-1, idx), colors.lightyellow)
+    doc = SimpleDocTemplate(pdf_path, pagesize=letter)
+    elements = []
 
-    table.setStyle(style)
-    elements.append(table)
+    # Split into chunks so the table doesn't exceed one page
+    chunk_size = 40
+    for start in range(0, len(data), chunk_size):
+        chunk = data[start:start + chunk_size]
+        table = Table(chunk, colWidths=col_widths, repeatRows=1)
+        table.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), colors.gray),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.whitesmoke),
+            ("GRID", (0, 0), (-1, -1), 0.5, colors.black),
+            ("FONTSIZE", (0, 0), (-1, -1), 8),
+            ("ALIGN", (0, 0), (-1, -1), "LEFT"),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ]))
+        elements.append(table)
+        elements.append(PageBreak())
+
     doc.build(elements)
+
 
 @app.route("/", methods=["GET", "POST"])
 def index():
@@ -157,6 +186,7 @@ def index():
         delete_file_after_delay(input_path)
 
         df_quotation = pd.read_excel(input_path)
+        df_quotation = ensure_expected_columns(df_quotation)  # NEW: Fix missing cols
         df_slab = pd.read_excel(SLAB_FILE)
         df_result = apply_price_scheme(df_quotation, df_slab)
 
@@ -185,4 +215,3 @@ def download(filename):
 
 if __name__ == "__main__":
     app.run(debug=False, host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
-
